@@ -1,0 +1,952 @@
+// AlphaGen Procedural Generators - Common Shader Functions
+// GPU-accelerated alpha texture generation
+// Ported from K-OS DCC TypeScript procedural system
+// Copyright 2026 K-Studio. All Rights Reserved.
+
+#pragma once
+
+// ============================================================================
+// HASH FUNCTIONS
+// ============================================================================
+
+float hash11(float p)
+{
+    p = frac(p * 0.1031);
+    p *= p + 33.33;
+    return frac((p + p) * p);
+}
+
+float hash21(float2 p)
+{
+    float3 p3 = frac(float3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return frac((p3.x + p3.y) * p3.z);
+}
+
+float2 hash22(float2 p)
+{
+    float3 p3 = frac(float3(p.xyx) * float3(0.1031, 0.1030, 0.0973));
+    p3 += dot(p3, p3.yzx + 33.33);
+    return frac((p3.xx + p3.yz) * p3.zy);
+}
+
+float3 hash33(float3 p3)
+{
+    p3 = frac(p3 * float3(0.1031, 0.1030, 0.0973));
+    p3 += dot(p3, p3.yxz + 33.33);
+    return frac((p3.xxy + p3.yxx) * p3.zyx);
+}
+
+// ============================================================================
+// BASE NOISE FUNCTIONS
+// ============================================================================
+
+// Gradient noise base for Perlin
+float grad2(float2 p)
+{
+    float2 i = floor(p);
+    float2 f = frac(p);
+    
+    // Quintic interpolation for smooth gradients
+    float2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    
+    float a = hash21(i + float2(0.0, 0.0));
+    float b = hash21(i + float2(1.0, 0.0));
+    float c = hash21(i + float2(0.0, 1.0));
+    float d = hash21(i + float2(1.0, 1.0));
+    
+    return lerp(lerp(a, b, u.x), lerp(c, d, u.x), u.y);
+}
+
+// Simplex-like noise (faster than true simplex, similar quality)
+float simplex2d(float2 p)
+{
+    const float K1 = 0.366025404; // (sqrt(3)-1)/2
+    const float K2 = 0.211324865; // (3-sqrt(3))/6
+    
+    float2 i = floor(p + (p.x + p.y) * K1);
+    float2 a = p - i + (i.x + i.y) * K2;
+    float2 o = (a.x > a.y) ? float2(1.0, 0.0) : float2(0.0, 1.0);
+    float2 b = a - o + K2;
+    float2 c = a - 1.0 + 2.0 * K2;
+    
+    float3 h = max(0.5 - float3(dot(a, a), dot(b, b), dot(c, c)), 0.0);
+    float3 n = h * h * h * h * float3(dot(a, hash22(i) - 0.5), dot(b, hash22(i + o) - 0.5), dot(c, hash22(i + 1.0) - 0.5));
+    
+    return dot(n, float3(70.0, 70.0, 70.0)) * 0.5 + 0.5;
+}
+
+// ============================================================================
+// FRACTAL NOISE VARIANTS (from TypeScript proceduralClient)
+// ============================================================================
+
+// Standard FBM
+float fbm(float2 p, int octaves, float lacunarity, float persistence)
+{
+    float value = 0.0;
+    float amplitude = 0.5;
+    float frequency = 1.0;
+    float maxValue = 0.0;
+    
+    // Clamp octaves to reasonable range
+    octaves = clamp(octaves, 1, 8);
+    
+    [unroll(8)]
+    for (int i = 0; i < 8; i++)
+    {
+        if (i < octaves)
+        {
+            value += amplitude * (grad2(p * frequency) * 2.0 - 1.0);
+            maxValue += amplitude;
+            amplitude *= persistence;
+            frequency *= lacunarity;
+        }
+    }
+    
+    return (value / maxValue) * 0.5 + 0.5;
+}
+
+// Ridged multifractal noise (sharp peaks)
+float fbm_ridged(float2 p, int octaves, float lacunarity, float persistence)
+{
+    float value = 0.0;
+    float amplitude = 0.5;
+    float frequency = 1.0;
+    float weight = 1.0;
+    
+    octaves = clamp(octaves, 1, 8);
+    
+    [unroll(8)]
+    for (int i = 0; i < 8; i++)
+    {
+        if (i < octaves)
+        {
+            float signal = grad2(p * frequency);
+            signal = 1.0 - abs(signal * 2.0 - 1.0); // Ridge transform
+            signal *= signal; // Square for sharper ridges
+            signal *= weight;
+            weight = saturate(signal * 2.0);
+            
+            value += signal * amplitude;
+            amplitude *= persistence;
+            frequency *= lacunarity;
+        }
+    }
+    
+    return saturate(value);
+}
+
+// Billowy/cloud-like noise (soft bumps)
+float fbm_billowy(float2 p, int octaves, float lacunarity, float persistence)
+{
+    float value = 0.0;
+    float amplitude = 0.5;
+    float frequency = 1.0;
+    float maxValue = 0.0;
+    
+    octaves = clamp(octaves, 1, 8);
+    
+    [unroll(8)]
+    for (int i = 0; i < 8; i++)
+    {
+        if (i < octaves)
+        {
+            float signal = grad2(p * frequency);
+            signal = abs(signal * 2.0 - 1.0); // Billowy transform (abs)
+            value += signal * amplitude;
+            maxValue += amplitude;
+            amplitude *= persistence;
+            frequency *= lacunarity;
+        }
+    }
+    
+    return value / maxValue;
+}
+
+// Turbulence (absolute value FBM)
+float fbm_turbulence(float2 p, int octaves, float lacunarity, float persistence)
+{
+    float value = 0.0;
+    float amplitude = 0.5;
+    float frequency = 1.0;
+    float maxValue = 0.0;
+    
+    octaves = clamp(octaves, 1, 8);
+    
+    [unroll(8)]
+    for (int i = 0; i < 8; i++)
+    {
+        if (i < octaves)
+        {
+            value += amplitude * abs(grad2(p * frequency) * 2.0 - 1.0);
+            maxValue += amplitude;
+            amplitude *= persistence;
+            frequency *= lacunarity;
+        }
+    }
+    
+    return value / maxValue;
+}
+
+// ============================================================================
+// PERLIN NOISE WRAPPERS
+// ============================================================================
+
+float perlin_noise(float2 uv, float scale, int octaves, float seed)
+{
+    float2 p = uv * scale + seed;
+    return fbm(p, octaves, 2.0, 0.5);
+}
+
+float ridged_noise(float2 uv, float scale, int octaves, float seed)
+{
+    float2 p = uv * scale + seed;
+    return fbm_ridged(p, octaves, 2.0, 0.5);
+}
+
+float billowy_noise(float2 uv, float scale, int octaves, float seed)
+{
+    float2 p = uv * scale + seed;
+    return fbm_billowy(p, octaves, 2.0, 0.5);
+}
+
+float simplex_noise(float2 uv, float scale, int octaves, float seed)
+{
+    float2 p = uv * scale + seed;
+    float value = 0.0;
+    float amplitude = 0.5;
+    float frequency = 1.0;
+    float maxValue = 0.0;
+    
+    octaves = clamp(octaves, 1, 8);
+    
+    [unroll(8)]
+    for (int i = 0; i < 8; i++)
+    {
+        if (i < octaves)
+        {
+            value += amplitude * simplex2d(p * frequency);
+            maxValue += amplitude;
+            amplitude *= 0.5;
+            frequency *= 2.0;
+        }
+    }
+    
+    return value / maxValue;
+}
+
+// ============================================================================
+// VORONOI / WORLEY (from TypeScript VoronoiParams)
+// ============================================================================
+
+// Distance functions for different metrics
+float dist_euclidean(float2 a, float2 b)
+{
+    float2 d = a - b;
+    return sqrt(dot(d, d));
+}
+
+float dist_manhattan(float2 a, float2 b)
+{
+    float2 d = abs(a - b);
+    return d.x + d.y;
+}
+
+float dist_chebyshev(float2 a, float2 b)
+{
+    float2 d = abs(a - b);
+    return max(d.x, d.y);
+}
+
+// Full voronoi with distance type selection
+// distance_type: 0=euclidean, 1=manhattan, 2=chebyshev
+float2 voronoi_full(float2 uv, float scale, float jitter, float seed, int distance_type)
+{
+    float2 n = floor(uv * scale);
+    float2 f = frac(uv * scale);
+    
+    float F1 = 8.0;
+    float F2 = 8.0;
+    
+    for (int j = -1; j <= 1; j++)
+    {
+        for (int i = -1; i <= 1; i++)
+        {
+            float2 g = float2(i, j);
+            float2 o = hash22(n + g + seed) * jitter;
+            float2 r = g + o - f;
+            
+            float d;
+            if (distance_type == 1)
+                d = dist_manhattan(float2(0, 0), r);
+            else if (distance_type == 2)
+                d = dist_chebyshev(float2(0, 0), r);
+            else
+                d = dist_euclidean(float2(0, 0), r);
+            
+            if (d < F1)
+            {
+                F2 = F1;
+                F1 = d;
+            }
+            else if (d < F2)
+            {
+                F2 = d;
+            }
+        }
+    }
+    
+    return float2(F1, F2);
+}
+
+// Legacy voronoi (euclidean)
+float2 voronoi(float2 uv, float scale, float randomness, float seed)
+{
+    return voronoi_full(uv, scale, randomness, seed, 0);
+}
+
+float worley_noise(float2 uv, float scale, float randomness, float seed)
+{
+    return voronoi(uv, scale, randomness, seed).x;
+}
+
+float voronoi_edges(float2 uv, float scale, float edge_width, float seed)
+{
+    float2 v = voronoi(uv, scale, 1.0, seed);
+    float edge = (v.y - v.x);
+    return saturate(edge / edge_width);
+}
+
+// ============================================================================
+// SEAMLESS TILING (from TypeScript)
+// ============================================================================
+
+float2 seamless_uv(float2 uv)
+{
+    // Makes noise tile seamlessly by blending at edges
+    float2 s = sin(uv * 6.28318530718);
+    float2 c = cos(uv * 6.28318530718);
+    return float2(s.x * c.y, c.x * s.y) * 0.5 + 0.5;
+}
+
+// ============================================================================
+// POST-PROCESSING (from TypeScript ProceduralParams)
+// ============================================================================
+
+float apply_contrast(float value, float contrast)
+{
+    return saturate((value - 0.5) * contrast + 0.5);
+}
+
+float apply_brightness(float value, float brightness)
+{
+    return saturate(value + brightness);
+}
+
+float apply_invert(float value, bool invert)
+{
+    return invert ? 1.0 - value : value;
+}
+
+// Combined post-process
+float post_process(float value, float contrast, float brightness, bool invert)
+{
+    value = apply_contrast(value, contrast);
+    value = apply_brightness(value, brightness);
+    value = apply_invert(value, invert);
+    return value;
+}
+
+// ============================================================================
+// SHAPE GENERATORS
+// ============================================================================
+
+float radial_falloff(float2 uv, float falloff_power)
+{
+    float2 centered = uv - 0.5;
+    float dist = length(centered) * 2.0;
+    return saturate(1.0 - pow(dist, falloff_power));
+}
+
+float circle(float2 uv, float radius, float edge_softness)
+{
+    float2 centered = uv - 0.5;
+    float dist = length(centered) * 2.0;
+    float edge = (radius - dist) / max(edge_softness, 0.001);
+    return saturate(edge);
+}
+
+float square(float2 uv, float size, float edge_softness)
+{
+    float2 centered = abs(uv - 0.5) * 2.0;
+    float2 edge = (size - centered) / max(edge_softness, 0.001);
+    return saturate(min(edge.x, edge.y));
+}
+
+float diamond(float2 uv, float size, float edge_softness)
+{
+    float2 centered = abs(uv - 0.5) * 2.0;
+    float manhattan = centered.x + centered.y;
+    float edge = (size * 1.414 - manhattan) / max(edge_softness, 0.001);
+    return saturate(edge);
+}
+
+// ============================================================================
+// PATTERN GENERATORS
+// ============================================================================
+
+float bricks(float2 uv, float brick_width, float brick_height, float mortar_width)
+{
+    float row = floor(uv.y / brick_height);
+    float offset = fmod(row, 2.0) * 0.5 * brick_width;
+    
+    float2 brick_uv = float2(fmod(uv.x + offset, brick_width), fmod(uv.y, brick_height));
+    
+    float in_mortar_x = brick_uv.x < mortar_width || brick_uv.x > brick_width - mortar_width;
+    float in_mortar_y = brick_uv.y < mortar_width || brick_uv.y > brick_height - mortar_width;
+    
+    if (in_mortar_x || in_mortar_y)
+        return 0.0;
+    
+    float edge_x = min(brick_uv.x - mortar_width, brick_width - mortar_width - brick_uv.x);
+    float edge_y = min(brick_uv.y - mortar_width, brick_height - mortar_width - brick_uv.y);
+    float edge = min(edge_x, edge_y) / mortar_width;
+    
+    return saturate(edge);
+}
+
+float dots(float2 uv, float dot_radius, float spacing)
+{
+    float2 cell = floor(uv / spacing) + 0.5;
+    float2 cell_center = cell * spacing;
+    float dist = length(uv - cell_center);
+    return saturate(1.0 - dist / dot_radius);
+}
+
+// ============================================================================
+// UV UTILITIES
+// ============================================================================
+
+float2 transform_uv(float2 uv, float rotation, float scale, float2 offset)
+{
+    float2 centered = uv - 0.5;
+    
+    float cos_r = cos(rotation);
+    float sin_r = sin(rotation);
+    float2 rotated = float2(
+        centered.x * cos_r - centered.y * sin_r,
+        centered.x * sin_r + centered.y * cos_r
+    );
+    
+    return rotated / scale + 0.5 + offset;
+}
+
+// ============================================================================
+// 4D NOISE (For Seamless Tiling via Clifford Torus)
+// Maps 2D UVs onto a 4D hypersphere for perfect tileable noise
+// ============================================================================
+
+// 4D Hash: Input 4D coord -> Output random value
+float hash41(float4 p)
+{
+    p = frac(p * float4(0.1031, 0.1030, 0.0973, 0.1099));
+    p += dot(p, p.wzxy + 33.33);
+    return frac((p.x + p.y) * (p.z + p.w));
+}
+
+// 4D Value Noise - Interpolates between 16 corners of a hypercube
+// Simpler than 4D Perlin gradient noise, but perfectly seamless
+float noise4d(float4 p)
+{
+    float4 i = floor(p);
+    float4 f = frac(p);
+    
+    // Quintic smoothstep for smooth gradients
+    float4 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    
+    // Hash all 16 corners of the 4D hypercube
+    float n0000 = hash41(i + float4(0,0,0,0));
+    float n1000 = hash41(i + float4(1,0,0,0));
+    float n0100 = hash41(i + float4(0,1,0,0));
+    float n1100 = hash41(i + float4(1,1,0,0));
+    float n0010 = hash41(i + float4(0,0,1,0));
+    float n1010 = hash41(i + float4(1,0,1,0));
+    float n0110 = hash41(i + float4(0,1,1,0));
+    float n1110 = hash41(i + float4(1,1,1,0));
+    float n0001 = hash41(i + float4(0,0,0,1));
+    float n1001 = hash41(i + float4(1,0,0,1));
+    float n0101 = hash41(i + float4(0,1,0,1));
+    float n1101 = hash41(i + float4(1,1,0,1));
+    float n0011 = hash41(i + float4(0,0,1,1));
+    float n1011 = hash41(i + float4(1,0,1,1));
+    float n0111 = hash41(i + float4(0,1,1,1));
+    float n1111 = hash41(i + float4(1,1,1,1));
+
+    // 4D interpolation cascade
+    float nx000 = lerp(n0000, n1000, u.x);
+    float nx100 = lerp(n0100, n1100, u.x);
+    float nx010 = lerp(n0010, n1010, u.x);
+    float nx110 = lerp(n0110, n1110, u.x);
+    float nx001 = lerp(n0001, n1001, u.x);
+    float nx101 = lerp(n0101, n1101, u.x);
+    float nx011 = lerp(n0011, n1011, u.x);
+    float nx111 = lerp(n0111, n1111, u.x);
+
+    float nxy00 = lerp(nx000, nx100, u.y);
+    float nxy10 = lerp(nx010, nx110, u.y);
+    float nxy01 = lerp(nx001, nx101, u.y);
+    float nxy11 = lerp(nx011, nx111, u.y);
+
+    float nxyz0 = lerp(nxy00, nxy10, u.z);
+    float nxyz1 = lerp(nxy01, nxy11, u.z);
+
+    return lerp(nxyz0, nxyz1, u.w);
+}
+
+// Fractal Brownian Motion in 4D for multi-octave seamless noise
+float fbm4d(float4 p, int octaves, float lacunarity, float persistence)
+{
+    float value = 0.0;
+    float amplitude = 0.5;
+    float maxValue = 0.0;
+    
+    octaves = clamp(octaves, 1, 8);
+    
+    [unroll(8)]
+    for (int i = 0; i < 8; i++)
+    {
+        if (i < octaves)
+        {
+            value += noise4d(p) * amplitude;
+            maxValue += amplitude;
+            p *= lacunarity;
+            amplitude *= persistence;
+        }
+    }
+    
+    return value / maxValue;
+}
+
+// Ridged 4D FBM for sharp mountain-like patterns
+float fbm4d_ridged(float4 p, int octaves, float lacunarity, float persistence)
+{
+    float value = 0.0;
+    float amplitude = 0.5;
+    float weight = 1.0;
+    
+    octaves = clamp(octaves, 1, 8);
+    
+    [unroll(8)]
+    for (int i = 0; i < 8; i++)
+    {
+        if (i < octaves)
+        {
+            float signal = noise4d(p);
+            signal = 1.0 - abs(signal * 2.0 - 1.0);
+            signal *= signal;
+            signal *= weight;
+            weight = saturate(signal * 2.0);
+            
+            value += signal * amplitude;
+            p *= lacunarity;
+            amplitude *= persistence;
+        }
+    }
+    
+    return saturate(value);
+}
+
+// Billowy 4D FBM for cloud-like patterns
+float fbm4d_billowy(float4 p, int octaves, float lacunarity, float persistence)
+{
+    float value = 0.0;
+    float amplitude = 0.5;
+    float maxValue = 0.0;
+    
+    octaves = clamp(octaves, 1, 8);
+    
+    [unroll(8)]
+    for (int i = 0; i < 8; i++)
+    {
+        if (i < octaves)
+        {
+            float signal = abs(noise4d(p) * 2.0 - 1.0);
+            value += signal * amplitude;
+            maxValue += amplitude;
+            p *= lacunarity;
+            amplitude *= persistence;
+        }
+    }
+    
+    return value / maxValue;
+}
+
+// Wrapper for seamless noise generation - maps 2D UV to 4D Clifford Torus
+// This is the magic that makes noise tile perfectly on both axes
+float seamless_noise_4d(float2 uv, float scale, int octaves, float seed)
+{
+    // Map 2D to 4D Clifford Torus
+    float2 angles = uv * 6.28318530718; // 2*PI
+    
+    float4 p;
+    p.x = cos(angles.x) * scale;
+    p.y = sin(angles.x) * scale;
+    p.z = cos(angles.y) * scale;
+    p.w = sin(angles.y) * scale + seed;
+    
+    return fbm4d(p, octaves, 2.0, 0.5);
+}
+
+float seamless_noise_4d_ridged(float2 uv, float scale, int octaves, float seed)
+{
+    float2 angles = uv * 6.28318530718;
+    
+    float4 p;
+    p.x = cos(angles.x) * scale;
+    p.y = sin(angles.x) * scale;
+    p.z = cos(angles.y) * scale;
+    p.w = sin(angles.y) * scale + seed;
+    
+    return fbm4d_ridged(p, octaves, 2.0, 0.5);
+}
+
+float seamless_noise_4d_billowy(float2 uv, float scale, int octaves, float seed)
+{
+    float2 angles = uv * 6.28318530718;
+    
+    float4 p;
+    p.x = cos(angles.x) * scale;
+    p.y = sin(angles.x) * scale;
+    p.z = cos(angles.y) * scale;
+    p.w = sin(angles.y) * scale + seed;
+    
+    return fbm4d_billowy(p, octaves, 2.0, 0.5);
+}
+
+
+// ============================================================================
+// CROSSHATCH & LINE PATTERNS
+// ============================================================================
+
+// Crosshatch pattern - diagonal lines
+float crosshatch(float2 uv, float scale, float thickness, float angle)
+{
+    float2 rotated = uv;
+    if (abs(angle) > 0.01)
+    {
+        float cos_a = cos(angle);
+        float sin_a = sin(angle);
+        rotated = float2(
+            uv.x * cos_a - uv.y * sin_a,
+            uv.x * sin_a + uv.y * cos_a
+        );
+    }
+    
+    float2 scaled = rotated * scale;
+    float line1 = abs(frac(scaled.x) - 0.5);
+    float line2 = abs(frac(scaled.y) - 0.5);
+    
+    float val1 = smoothstep(thickness, thickness + 0.01, line1);
+    float val2 = smoothstep(thickness, thickness + 0.01, line2);
+    
+    return min(val1, val2);
+}
+
+// Wave patterns
+float wave_horizontal(float2 uv, float frequency, float amplitude)
+{
+    float wave = sin(uv.y * frequency * 6.28318530718) * amplitude;
+    return saturate(0.5 + wave);
+}
+
+float wave_vertical(float2 uv, float frequency, float amplitude)
+{
+    float wave = sin(uv.x * frequency * 6.28318530718) * amplitude;
+    return saturate(0.5 + wave);
+}
+
+float wave_radial(float2 uv, float frequency, float amplitude)
+{
+    float2 centered = uv - 0.5;
+    float dist = length(centered) * 2.0;
+    float wave = sin(dist * frequency * 6.28318530718) * amplitude;
+    return saturate(0.5 + wave);
+}
+
+// Checkerboard
+float checkerboard(float2 uv, float scale)
+{
+    float2 grid = floor(uv * scale);
+    float checker = fmod(grid.x + grid.y, 2.0);
+    return checker;
+}
+
+
+// Hexagon Grid (from guide.txt)
+// Returns: x = distance to edge, y = cell ID hash
+float2 hexagon_grid(float2 uv, float scale)
+{
+    uv *= scale;
+    
+    const float3 k = float3(-0.866025404, 0.5, 0.577350269);
+    float2 is = floor(uv + (uv.x * 0.577350269));
+    float2 ip = floor(uv);
+    float2 f = frac(uv);
+    
+    float2 p = abs(f - 0.5);
+    float d = dot(p, k.xy);
+    float hex = max(d, p.x);
+    
+    // Cell ID hashing
+    float2 id_uv = uv;
+    float id = hash21(floor(id_uv));
+    
+    return float2(1.0 - hex * 2.0, id); // Normalized so 1.0 is center, 0.0 is edge
+}
+
+
+// ============================================================================
+// TEARS / DRIPS PATTERN
+// ============================================================================
+
+float tears(float2 uv, float scale, float length, float seed)
+{
+    float2 scaled = uv * scale;
+    float2 cell_id = floor(scaled);
+    float2 cell_uv = frac(scaled);
+    
+    float cell_hash = hash21(cell_id + seed);
+    
+    // Random x offset within cell
+    float drip_x = cell_hash;
+    
+    // Vertical drip with varying length
+    float drip_length = length * (0.5 + cell_hash * 0.5);
+    float dist_x = abs(cell_uv.x - drip_x);
+    float drip_width = 0.05 + cell_hash * 0.05;
+    
+    // Vertical gradient
+    float drip_y = smoothstep(0.0, drip_length, cell_uv.y);
+    
+    // Combine
+    float drip = smoothstep(drip_width, 0.0, dist_x) * drip_y;
+    
+    return drip;
+}
+
+// ============================================================================
+// SCRATCHES PATTERN
+// ============================================================================
+
+float scratches(float2 uv, float density, float length, float seed)
+{
+    float result = 0.0;
+    
+    // Multiple layers of scratches
+    for (int i = 0; i < 8; i++)
+    {
+        float layer_seed = seed + float(i) * 123.456;
+        float2 offset = hash22(float2(layer_seed, layer_seed * 2.0));
+        float2 scratch_uv = uv + offset;
+        
+        float angle = hash11(layer_seed) * 6.28318530718;
+        float cos_a = cos(angle);
+        float sin_a = sin(angle);
+        
+        float2 rotated = float2(
+            scratch_uv.x * cos_a - scratch_uv.y * sin_a,
+            scratch_uv.x * sin_a + scratch_uv.y * cos_a
+        );
+        
+        float2 scratch_pos = rotated * density;
+        float scratch_id = floor(scratch_pos.y);
+        float scratch_frac = frac(scratch_pos.y);
+        
+        float scratch_hash = hash11(scratch_id + layer_seed);
+        
+        if (scratch_hash > 0.7) // Only some cells have scratches
+        {
+            float scratch_x = frac(scratch_pos.x + scratch_hash);
+            float scratch_width = 0.002 + scratch_hash * 0.003;
+            float scratch_len = length * (0.3 + scratch_hash * 0.7);
+            
+            float dist = abs(scratch_x - 0.5);
+            float scratch_val = smoothstep(scratch_width, 0.0, dist);
+            scratch_val *= smoothstep(0.0, 0.1, scratch_frac) * smoothstep(scratch_len, scratch_len - 0.1, scratch_frac);
+            
+            result = max(result, scratch_val * (0.5 + scratch_hash * 0.5));
+        }
+    }
+    
+    return result;
+}
+
+// ============================================================================
+// SPLATTER PATTERN
+// ============================================================================
+
+float splatter(float2 uv, float scale, float size, float seed)
+{
+    float result = 0.0;
+    float2 scaled = uv * scale;
+    
+    // Multiple splatter layers
+    for (int i = 0; i < 16; i++)
+    {
+        float layer_seed = seed + float(i) * 234.567;
+        float2 splat_pos = hash22(float2(layer_seed, layer_seed * 3.0));
+        
+        float2 to_splat = scaled - splat_pos * scale;
+        float dist = length(to_splat);
+        
+        float splat_size = size * (0.3 + hash11(layer_seed + 100.0) * 0.7);
+        float splat_val = smoothstep(splat_size, splat_size * 0.5, dist);
+        
+        // Add some noise to edges
+        float edge_noise = simplex2d((splat_pos + to_splat) * 20.0 + seed);
+        splat_val *= 0.7 + edge_noise * 0.3;
+        
+        result = max(result, splat_val);
+    }
+    
+    return result;
+}
+
+// ============================================================================
+// CRACKS PATTERN (Voronoi-based)
+// ============================================================================
+
+float cracks(float2 uv, float scale, float width, float seed)
+{
+    float2 v = voronoi(uv, scale, 1.0, seed);
+    
+    // Distance between closest and second closest
+    float crack = v.y - v.x;
+    
+    // Sharpen the crack
+    crack = smoothstep(0.0, width, crack);
+    
+    // Add some noise variation
+    float noise_var = simplex2d(uv * scale * 2.0 + seed) * 0.3;
+    crack = saturate(crack + noise_var);
+    
+    return 1.0 - crack; // Invert so cracks are white
+}
+
+// ============================================================================
+// CELLS / ORGANIC PATTERN
+// ============================================================================
+
+float cells(float2 uv, float scale, float contrast, float seed)
+{
+    float2 v = voronoi(uv, scale, 0.8, seed);
+    
+    // Use F1 distance with some variation
+    float cell_val = v.x;
+    
+    // Add organic variation with noise
+    float noise = simplex2d(uv * scale * 3.0 + seed) * 0.3;
+    cell_val = saturate(cell_val + noise);
+    
+    // Apply contrast
+    cell_val = saturate((cell_val - 0.5) * contrast + 0.5);
+    
+    return cell_val;
+}
+
+// ============================================================================
+// GRUNGE PATTERN (Multi-layer noise)
+// ============================================================================
+
+float grunge(float2 uv, float scale, float detail, float seed)
+{
+    float result = 0.0;
+    
+    // Layer 1: Large features
+    result += simplex2d(uv * scale * 0.5 + seed) * 0.4;
+    
+    // Layer 2: Medium features
+    result += simplex2d(uv * scale * 2.0 + seed + 100.0) * 0.3;
+    
+    // Layer 3: Fine detail
+    result += simplex2d(uv * scale * 8.0 + seed + 200.0) * 0.2 * detail;
+    
+    // Layer 4: Very fine detail
+    result += simplex2d(uv * scale * 32.0 + seed + 300.0) * 0.1 * detail;
+    
+    // Add some voronoi cells for variation
+    float2 v = voronoi(uv, scale * 4.0, 0.5, seed);
+    result += v.x * 0.2;
+    
+    return saturate(result);
+}
+
+// ============================================================================
+// FIBERS PATTERN
+// ============================================================================
+
+float fibers(float2 uv, float scale, float angle, float seed)
+{
+    // Rotate UV
+    float cos_a = cos(angle);
+    float sin_a = sin(angle);
+    float2 rotated = float2(
+        uv.x * cos_a - uv.y * sin_a,
+        uv.x * sin_a + uv.y * cos_a
+    );
+    
+    float2 scaled = rotated * scale;
+    
+    float result = 0.0;
+    
+    // Multiple fiber layers
+    for (int i = 0; i < 12; i++)
+    {
+        float layer_seed = seed + float(i) * 345.678;
+        float offset = hash11(layer_seed) * 100.0;
+        
+        // Wavy fibers
+        float fiber_x = scaled.x + sin(scaled.y * 2.0 + layer_seed) * 0.1;
+        float fiber_y = scaled.y + offset;
+        
+        float fiber_id = floor(fiber_y);
+        float fiber_frac = frac(fiber_y);
+        
+        float fiber_hash = hash11(fiber_id + layer_seed);
+        float fiber_width = 0.02 + fiber_hash * 0.03;
+        
+        float dist = abs(frac(fiber_x + fiber_hash) - 0.5);
+        float fiber_val = smoothstep(fiber_width, 0.0, dist);
+        
+        result = max(result, fiber_val * (0.3 + fiber_hash * 0.7));
+    }
+    
+    return result;
+}
+
+// ============================================================================
+// CAUSTICS PATTERN (Animated water light)
+// ============================================================================
+
+float caustics(float2 uv, float scale, float time, float seed)
+{
+    float2 p = uv * scale;
+    
+    // Layer 1
+    float2 p1 = p + float2(sin(time * 0.3 + seed), cos(time * 0.4 + seed)) * 0.5;
+    float v1 = voronoi(p1, 1.0, 0.5, seed).x;
+    
+    // Layer 2 (offset and scaled)
+    float2 p2 = p * 1.3 + float2(cos(time * 0.5 + seed + 1.0), sin(time * 0.6 + seed + 1.0)) * 0.5;
+    float v2 = voronoi(p2, 1.0, 0.5, seed + 100.0).x;
+    
+    // Combine with power function for caustic look
+    float caustic = pow(v1 * v2, 0.5);
+    caustic = saturate(caustic * 2.0);
+    
+    // Add some shimmer
+    float shimmer = simplex2d(p * 4.0 + time + seed);
+    caustic = saturate(caustic + shimmer * 0.2);
+    
+    return caustic;
+}

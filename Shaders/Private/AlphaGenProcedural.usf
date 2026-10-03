@@ -1,0 +1,449 @@
+// AlphaGen Procedural Generator Compute Shaders
+// GPU-accelerated alpha texture generation
+// Copyright 2026 K-Studio. All Rights Reserved.
+
+#include "/Engine/Public/Platform.ush"
+#include "/Plugin/AlphaGen/Private/AlphaGenCommon.ush"
+#include "/Engine/Private/Common.ush"
+
+// Output texture for all kernels
+RWTexture2D<float4> OutputTexture;
+
+// Shared parameters
+uint2 TextureSize;
+float4 ProceduralParams;  // x=Falloff/Scale, y=EdgeSoftness/Octaves, z=Seed, w=Unused
+float4 ProceduralParams2; // Pattern-specific: x=Width, y=Height, z=Mortar/Spacing, w=Unused
+
+// Generator type definitions
+#define GEN_RADIAL   0
+#define GEN_CIRCLE   1
+#define GEN_SQUARE   2
+#define GEN_DIAMOND  3
+#define GEN_PERLIN   4
+#define GEN_VORONOI  5
+#define GEN_BRICKS   6
+#define GEN_DOTS     7
+
+// Radial falloff kernel
+[numthreads(8, 8, 1)]
+void GenerateRadialCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    if (DispatchThreadId.x >= TextureSize.x || DispatchThreadId.y >= TextureSize.y)
+        return;
+    
+    float2 uv = (float2(DispatchThreadId.xy) + 0.5) / float2(TextureSize);
+    
+    float falloff_power = ProceduralParams.x;
+    float value = radial_falloff(uv, falloff_power);
+    
+    OutputTexture[DispatchThreadId.xy] = float4(value, value, value, 1.0);
+}
+
+// Circle kernel
+[numthreads(8, 8, 1)]
+void GenerateCircleCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    if (DispatchThreadId.x >= TextureSize.x || DispatchThreadId.y >= TextureSize.y)
+        return;
+    
+    float2 uv = (float2(DispatchThreadId.xy) + 0.5) / float2(TextureSize);
+    
+    float radius = ProceduralParams.x;  // scale controls size
+    float softness = ProceduralParams.y;
+    float value = circle(uv, radius, softness);
+    
+    OutputTexture[DispatchThreadId.xy] = float4(value, value, value, 1.0);
+}
+
+// Square kernel
+[numthreads(8, 8, 1)]
+void GenerateSquareCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    if (DispatchThreadId.x >= TextureSize.x || DispatchThreadId.y >= TextureSize.y)
+        return;
+    
+    float2 uv = (float2(DispatchThreadId.xy) + 0.5) / float2(TextureSize);
+    
+    float size = ProceduralParams.x;  // scale controls size
+    float softness = ProceduralParams.y;
+    float value = square(uv, size, softness);
+    
+    OutputTexture[DispatchThreadId.xy] = float4(value, value, value, 1.0);
+}
+
+// Diamond kernel
+[numthreads(8, 8, 1)]
+void GenerateDiamondCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    if (DispatchThreadId.x >= TextureSize.x || DispatchThreadId.y >= TextureSize.y)
+        return;
+    
+    float2 uv = (float2(DispatchThreadId.xy) + 0.5) / float2(TextureSize);
+    
+    float size = ProceduralParams.x;  // scale controls size
+    float softness = ProceduralParams.y;
+    float value = diamond(uv, size, softness);
+    
+    OutputTexture[DispatchThreadId.xy] = float4(value, value, value, 1.0);
+}
+
+// Perlin/Noise kernel - supports multiple noise types via ProceduralParams2.w
+// noise_type: 0=perlin, 1=simplex, 2=ridged, 3=billowy, 4=worley
+[numthreads(8, 8, 1)]
+void GeneratePerlinCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    if (DispatchThreadId.x >= TextureSize.x || DispatchThreadId.y >= TextureSize.y)
+        return;
+    
+    float2 uv = (float2(DispatchThreadId.xy) + 0.5) / float2(TextureSize);
+    
+    float scale = ProceduralParams.x;
+    int octaves = (int)ProceduralParams.y;
+    float seed = ProceduralParams.z;
+    int noise_type = (int)ProceduralParams2.w;
+    
+    float value;
+    
+    if (noise_type == 1)
+        value = simplex_noise(uv, scale, octaves, seed);
+    else if (noise_type == 2)
+        value = ridged_noise(uv, scale, octaves, seed);
+    else if (noise_type == 3)
+        value = billowy_noise(uv, scale, octaves, seed);
+    else if (noise_type == 4)
+        value = worley_noise(uv, scale, 1.0, seed);
+    else
+        value = perlin_noise(uv, scale, octaves, seed);
+    
+    OutputTexture[DispatchThreadId.xy] = float4(value, value, value, 1.0);
+}
+
+// Voronoi kernel
+[numthreads(8, 8, 1)]
+void GenerateVoronoiCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    if (DispatchThreadId.x >= TextureSize.x || DispatchThreadId.y >= TextureSize.y)
+        return;
+    
+    float2 uv = (float2(DispatchThreadId.xy) + 0.5) / float2(TextureSize);
+    
+    float scale = ProceduralParams.x;
+    float edge_width = ProceduralParams.y;
+    float seed = ProceduralParams.z;
+    float value = voronoi_edges(uv, scale, edge_width, seed);
+    
+    OutputTexture[DispatchThreadId.xy] = float4(value, value, value, 1.0);
+}
+
+// Bricks kernel
+[numthreads(8, 8, 1)]
+void GenerateBricksCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    if (DispatchThreadId.x >= TextureSize.x || DispatchThreadId.y >= TextureSize.y)
+        return;
+    
+    float2 uv = (float2(DispatchThreadId.xy) + 0.5) / float2(TextureSize);
+    
+    float brickWidth = ProceduralParams2.x;
+    float brickHeight = ProceduralParams2.y;
+    float mortarWidth = ProceduralParams2.z;
+    float value = bricks(uv, brickWidth, brickHeight, mortarWidth);
+    
+    OutputTexture[DispatchThreadId.xy] = float4(value, value, value, 1.0);
+}
+
+// Dots kernel
+[numthreads(8, 8, 1)]
+void GenerateDotsCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    if (DispatchThreadId.x >= TextureSize.x || DispatchThreadId.y >= TextureSize.y)
+        return;
+    
+    float2 uv = (float2(DispatchThreadId.xy) + 0.5) / float2(TextureSize);
+    
+    float dotRadius = ProceduralParams2.x;
+    float spacing = ProceduralParams2.y;
+    float value = dots(uv, dotRadius, spacing);
+    
+    OutputTexture[DispatchThreadId.xy] = float4(value, value, value, 1.0);
+}
+
+// Seamless 4D Tiling Noise kernel - uses Clifford Torus mapping for perfect seams
+// noise_type in ProceduralParams2.w: 0=standard, 1=ridged, 2=billowy
+[numthreads(8, 8, 1)]
+void GenerateSeamlessNoiseCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    if (DispatchThreadId.x >= TextureSize.x || DispatchThreadId.y >= TextureSize.y)
+        return;
+    
+    float2 uv = (float2(DispatchThreadId.xy) + 0.5) / float2(TextureSize);
+    
+    float scale = ProceduralParams.x;
+    int octaves = (int)ProceduralParams.y;
+    float seed = ProceduralParams.z;
+    int noise_type = (int)ProceduralParams2.w;
+    
+    float value;
+    
+    if (noise_type == 1)
+        value = seamless_noise_4d_ridged(uv, scale, octaves, seed);
+    else if (noise_type == 2)
+        value = seamless_noise_4d_billowy(uv, scale, octaves, seed);
+    else
+        value = seamless_noise_4d(uv, scale, octaves, seed);
+    
+    // Slight contrast boost since 4D value noise can be softer
+    value = smoothstep(0.15, 0.85, value);
+    
+    OutputTexture[DispatchThreadId.xy] = float4(value, value, value, 1.0);
+}
+
+
+// ============================================================================
+// CROSSHATCH PATTERN
+// ============================================================================
+
+// Params: x=Scale, y=Thickness, z=Angle
+[numthreads(8, 8, 1)]
+void GenerateCrosshatchCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    if (DispatchThreadId.x >= TextureSize.x || DispatchThreadId.y >= TextureSize.y)
+        return;
+    
+    float2 uv = (float2(DispatchThreadId.xy) + 0.5) / float2(TextureSize);
+    
+    float scale = ProceduralParams.x;
+    float thickness = ProceduralParams.y;
+    float angle = ProceduralParams.z;
+    
+    float value = crosshatch(uv, scale, thickness, angle);
+    
+    OutputTexture[DispatchThreadId.xy] = float4(value, value, value, 1.0);
+}
+
+// ============================================================================
+// WAVE PATTERNS
+// ============================================================================
+
+// Params: x=Frequency, y=Amplitude, z=Type (0=horizontal, 1=vertical, 2=radial)
+[numthreads(8, 8, 1)]
+void GenerateWavesCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    if (DispatchThreadId.x >= TextureSize.x || DispatchThreadId.y >= TextureSize.y)
+        return;
+    
+    float2 uv = (float2(DispatchThreadId.xy) + 0.5) / float2(TextureSize);
+    
+    float frequency = ProceduralParams.x;
+    float amplitude = ProceduralParams.y;
+    float type = ProceduralParams.z;
+    
+    float value;
+    if (type < 0.5)
+        value = wave_horizontal(uv, frequency, amplitude);
+    else if (type < 1.5)
+        value = wave_vertical(uv, frequency, amplitude);
+    else
+        value = wave_radial(uv, frequency, amplitude);
+    
+    OutputTexture[DispatchThreadId.xy] = float4(value, value, value, 1.0);
+}
+
+// ============================================================================
+// CHECKERBOARD
+// ============================================================================
+
+// Params: x=Scale
+[numthreads(8, 8, 1)]
+void GenerateCheckerboardCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    if (DispatchThreadId.x >= TextureSize.x || DispatchThreadId.y >= TextureSize.y)
+        return;
+    
+    float2 uv = (float2(DispatchThreadId.xy) + 0.5) / float2(TextureSize);
+    
+    float scale = ProceduralParams.x;
+    float value = checkerboard(uv, scale);
+    
+    OutputTexture[DispatchThreadId.xy] = float4(value, value, value, 1.0);
+}
+
+// ============================================================================
+// HEXAGON GRID (from guide.txt)
+// ============================================================================
+
+// Params: x=Scale, y=EdgeThickness, z=Seed
+[numthreads(8, 8, 1)]
+void GenerateHexagonCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    if (DispatchThreadId.x >= TextureSize.x || DispatchThreadId.y >= TextureSize.y)
+        return;
+    
+    float2 uv = (float2(DispatchThreadId.xy) + 0.5) / float2(TextureSize);
+    
+    float scale = ProceduralParams.x;
+    float thickness = max(ProceduralParams.y, 0.001);
+    
+    float2 hex = hexagon_grid(uv, scale);
+    // hex.x is distance to edge (1 in center, 0 at edge)
+    float value = smoothstep(0.0, thickness, hex.x);
+    
+    OutputTexture[DispatchThreadId.xy] = float4(value, value, value, 1.0);
+}
+
+
+// ============================================================================
+// NEW GENERATORS
+// ============================================================================
+
+// Tears Generator
+// Params: x=Scale, y=Length, z=Seed
+[numthreads(8, 8, 1)]
+void GenerateTearsCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    if (DispatchThreadId.x >= TextureSize.x || DispatchThreadId.y >= TextureSize.y)
+        return;
+    
+    float2 uv = (float2(DispatchThreadId.xy) + 0.5) / float2(TextureSize);
+    
+    float scale = ProceduralParams.x;
+    float length = ProceduralParams.y;
+    float seed = ProceduralParams.z;
+    
+    float value = tears(uv, scale, length, seed);
+    
+    OutputTexture[DispatchThreadId.xy] = float4(value, value, value, 1.0);
+}
+
+// Scratches Generator
+// Params: x=Density, y=Length, z=Seed
+[numthreads(8, 8, 1)]
+void GenerateScratchesCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    if (DispatchThreadId.x >= TextureSize.x || DispatchThreadId.y >= TextureSize.y)
+        return;
+    
+    float2 uv = (float2(DispatchThreadId.xy) + 0.5) / float2(TextureSize);
+    
+    float density = ProceduralParams.x;
+    float length = ProceduralParams.y;
+    float seed = ProceduralParams.z;
+    
+    float value = scratches(uv, density, length, seed);
+    
+    OutputTexture[DispatchThreadId.xy] = float4(value, value, value, 1.0);
+}
+
+// Splatter Generator
+// Params: x=Scale, y=Size, z=Seed
+[numthreads(8, 8, 1)]
+void GenerateSplatterCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    if (DispatchThreadId.x >= TextureSize.x || DispatchThreadId.y >= TextureSize.y)
+        return;
+    
+    float2 uv = (float2(DispatchThreadId.xy) + 0.5) / float2(TextureSize);
+    
+    float scale = ProceduralParams.x;
+    float size = ProceduralParams.y;
+    float seed = ProceduralParams.z;
+    
+    float value = splatter(uv, scale, size, seed);
+    
+    OutputTexture[DispatchThreadId.xy] = float4(value, value, value, 1.0);
+}
+
+// Cracks Generator
+// Params: x=Scale, y=Width, z=Seed
+[numthreads(8, 8, 1)]
+void GenerateCracksCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    if (DispatchThreadId.x >= TextureSize.x || DispatchThreadId.y >= TextureSize.y)
+        return;
+    
+    float2 uv = (float2(DispatchThreadId.xy) + 0.5) / float2(TextureSize);
+    
+    float scale = ProceduralParams.x;
+    float width = ProceduralParams.y;
+    float seed = ProceduralParams.z;
+    
+    float value = cracks(uv, scale, width, seed);
+    
+    OutputTexture[DispatchThreadId.xy] = float4(value, value, value, 1.0);
+}
+
+// Cells Generator
+// Params: x=Scale, y=Contrast, z=Seed
+[numthreads(8, 8, 1)]
+void GenerateCellsCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    if (DispatchThreadId.x >= TextureSize.x || DispatchThreadId.y >= TextureSize.y)
+        return;
+    
+    float2 uv = (float2(DispatchThreadId.xy) + 0.5) / float2(TextureSize);
+    
+    float scale = ProceduralParams.x;
+    float contrast = ProceduralParams.y;
+    float seed = ProceduralParams.z;
+    
+    float value = cells(uv, scale, contrast, seed);
+    
+    OutputTexture[DispatchThreadId.xy] = float4(value, value, value, 1.0);
+}
+
+// Grunge Generator
+// Params: x=Scale, y=Detail, z=Seed
+[numthreads(8, 8, 1)]
+void GenerateGrungeCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    if (DispatchThreadId.x >= TextureSize.x || DispatchThreadId.y >= TextureSize.y)
+        return;
+    
+    float2 uv = (float2(DispatchThreadId.xy) + 0.5) / float2(TextureSize);
+    
+    float scale = ProceduralParams.x;
+    float detail = ProceduralParams.y;
+    float seed = ProceduralParams.z;
+    
+    float value = grunge(uv, scale, detail, seed);
+    
+    OutputTexture[DispatchThreadId.xy] = float4(value, value, value, 1.0);
+}
+
+// Fibers Generator
+// Params: x=Scale, y=Angle, z=Seed
+[numthreads(8, 8, 1)]
+void GenerateFibersCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    if (DispatchThreadId.x >= TextureSize.x || DispatchThreadId.y >= TextureSize.y)
+        return;
+    
+    float2 uv = (float2(DispatchThreadId.xy) + 0.5) / float2(TextureSize);
+    
+    float scale = ProceduralParams.x;
+    float angle = ProceduralParams.y;
+    float seed = ProceduralParams.z;
+    
+    float value = fibers(uv, scale, angle, seed);
+    
+    OutputTexture[DispatchThreadId.xy] = float4(value, value, value, 1.0);
+}
+
+// Caustics Generator
+// Params: x=Scale, y=Time, z=Seed
+[numthreads(8, 8, 1)]
+void GenerateCausticsCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    if (DispatchThreadId.x >= TextureSize.x || DispatchThreadId.y >= TextureSize.y)
+        return;
+    
+    float2 uv = (float2(DispatchThreadId.xy) + 0.5) / float2(TextureSize);
+    
+    float scale = ProceduralParams.x;
+    float time = ProceduralParams.y;
+    float seed = ProceduralParams.z;
+    
+    float value = caustics(uv, scale, time, seed);
+    
+    OutputTexture[DispatchThreadId.xy] = float4(value, value, value, 1.0);
+}
