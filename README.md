@@ -22,7 +22,8 @@
 
 **AlphaGen** is a real-time procedural alpha, brush, and mask texture generation toolkit built natively for Unreal Engine 5. Powered by custom HLSL compute shaders via the Render Dependency Graph (RDG), AlphaGen allows you to design, filter, and export high-resolution alphas (up to 8K) directly inside the Unreal Editor without ever needing to jump into Photoshop or external DCC tools.
 
-*Note: This repository has a clean commit history because AlphaGen was previously developed inside a private monorepo. It has now been separated and made public on GitHub.*
+> [!NOTE]
+> *This repository has a clean commit history because AlphaGen was previously developed inside a private monorepo. It has now been separated and made public on GitHub.*
 
 ---
 
